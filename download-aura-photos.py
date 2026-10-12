@@ -62,6 +62,12 @@ def parse_command_line():
         help="write the raw asset JSON returned by the Aura API to this file",
         required=False,
     )
+    parser.add_argument(
+        "--history",
+        help="skip photos listed in this file and add each new download to it, "
+             "so moved or deleted photos are not downloaded again",
+        required=False,
+    )
     parser.add_argument('frame', nargs='?')
     args = parser.parse_args()
     return args
@@ -123,6 +129,7 @@ def app():
             count_only=args.count,
             videos_only=args.videos_only,
             save_assets_path=args.save_assets,
+            history_path=os.path.expanduser(args.history) if args.history else None,
         )
 
         if args.count:

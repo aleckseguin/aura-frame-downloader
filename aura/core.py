@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -86,7 +86,22 @@ def get_frame_assets(
     """
     frame_url = FRAME_URL_TEMPLATE.format(frame_id=frame_id)
     response = session.get(frame_url)
-    json_data = json.loads(response.text)
+    content_type = response.headers.get("Content-Type", "unknown")
+
+    if not response.ok:
+        raise DownloadError(
+            "Frame assets request failed with HTTP "
+            f"{response.status_code} (Content-Type: {content_type})"
+        )
+
+    try:
+        json_data = json.loads(response.text)
+    except json.JSONDecodeError as e:
+        raise DownloadError(
+            "Frame assets request returned invalid JSON "
+            f"(HTTP {response.status_code}, Content-Type: {content_type}, "
+            f"{len(response.content)} response bytes)"
+        ) from e
 
     if save_raw_response_path:
         with open(save_raw_response_path, 'w') as f:
@@ -101,6 +116,19 @@ def get_frame_assets(
     return json_data["assets"]
 
 
+def load_history(history_path: str) -> Set[str]:
+    """
+    Read the asset ids recorded in a download history file.
+
+    The file is plain text with one Aura asset id per line. A missing file
+    means nothing has been downloaded yet.
+    """
+    if not os.path.isfile(history_path):
+        return set()
+    with open(history_path, encoding="utf-8") as f:
+        return {line.strip().lower() for line in f if line.strip() and not line.startswith("#")}
+
+
 def download_photos_from_aura(
     email: str,
     password: str,
@@ -110,6 +138,7 @@ def download_photos_from_aura(
     count_only: bool = False,
     videos_only: bool = False,
     save_assets_path: Optional[str] = None,
+    history_path: Optional[str] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, int, int]:
@@ -125,6 +154,9 @@ def download_photos_from_aura(
         count_only: If True, return count without downloading
         videos_only: If True, only download video clips, skip still photos
         save_assets_path: If set, write the raw assets JSON returned by the API to this path
+        history_path: If set, skip assets whose id is listed in this file and append
+            the id of each asset once all its files are saved, so photos are not
+            downloaded again after they are moved or deleted
         progress_callback: Optional callback(current, total, filename) for progress updates
         cancel_check: Optional callback() that returns True if download should be cancelled
 
@@ -155,6 +187,14 @@ def download_photos_from_aura(
 
     LOGGER.info("Starting download process")
 
+    # A videos-only run skips stills, so it must not mark assets as done.
+    history = load_history(history_path) if history_path else set()
+    record_history = bool(history_path) and not videos_only
+    if history:
+        LOGGER.info("Skipping %d photos listed in history file %s", len(history), history_path)
+    if record_history and os.path.dirname(history_path):
+        os.makedirs(os.path.dirname(history_path), exist_ok=True)
+
     downloaded_count = 0
     skipped_count = 0
     current = 0
@@ -166,6 +206,11 @@ def download_photos_from_aura(
         if cancel_check and cancel_check():
             LOGGER.info("Download cancelled by user")
             raise DownloadCancelledError("Download cancelled by user")
+
+        if item['id'].lower() in history:
+            LOGGER.debug("%i: Skipping %s, in download history", current, item['id'])
+            skipped_count += 1
+            continue
 
         try:
             clean_time = item['taken_at'].replace(':', '-')
@@ -210,14 +255,24 @@ def download_photos_from_aura(
 
                 LOGGER.info("%i: Downloading %s %s", current, label, basename)
                 response = requests.get(url, stream=True, timeout=90)
+                response.raise_for_status()
 
-                with open(file_to_write, 'wb') as out_file:
+                # Write to a .part file first so an interrupted download is
+                # not mistaken for a finished one on the next run.
+                part_file = file_to_write + ".part"
+                with open(part_file, 'wb') as out_file:
                     shutil.copyfileobj(response.raw, out_file)
+                os.replace(part_file, file_to_write)
                 del response
 
                 downloaded_count += 1
 
                 time.sleep(2)
+
+            # Every file for this asset is now on disk.
+            if record_history:
+                with open(history_path, 'a', encoding='utf-8') as history_file:
+                    history_file.write(item['id'].lower() + "\n")
 
         except DownloadCancelledError:
             raise

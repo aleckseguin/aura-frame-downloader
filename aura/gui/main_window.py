@@ -3,7 +3,7 @@
 import json
 import os
 
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import Qt, QSettings, QStandardPaths
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -200,6 +200,15 @@ class MainWindow(QMainWindow):
         )
         options_layout.addWidget(self.save_assets_checkbox)
 
+        # Download history
+        self.history_checkbox = QCheckBox(
+            "Skip photos downloaded before, even if moved or deleted"
+        )
+        self.history_checkbox.setToolTip(
+            "Keeps a list of downloaded photos for each frame in:\n" + self._history_dir()
+        )
+        options_layout.addWidget(self.history_checkbox)
+
         layout.addWidget(options_group)
 
         # Progress section
@@ -232,6 +241,7 @@ class MainWindow(QMainWindow):
         self.year_checkbox.setChecked(self.settings.value("organize_by_year", False, type=bool))
         self.videos_only_checkbox.setChecked(self.settings.value("videos_only", False, type=bool))
         self.save_assets_checkbox.setChecked(self.settings.value("save_assets", False, type=bool))
+        self.history_checkbox.setChecked(self.settings.value("use_history", False, type=bool))
 
         # Load frames
         frames_json = self.settings.value("frames", "[]")
@@ -256,6 +266,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("organize_by_year", self.year_checkbox.isChecked())
         self.settings.setValue("videos_only", self.videos_only_checkbox.isChecked())
         self.settings.setValue("save_assets", self.save_assets_checkbox.isChecked())
+        self.settings.setValue("use_history", self.history_checkbox.isChecked())
         self.settings.setValue("frames", json.dumps(self.frames))
         self.settings.setValue("selected_frame", self.frame_combo.currentText())
 
@@ -383,6 +394,10 @@ class MainWindow(QMainWindow):
         if self.save_assets_checkbox.isChecked():
             save_assets_path = os.path.join(download_path, "aura-assets.json")
 
+        history_path = None
+        if self.history_checkbox.isChecked():
+            history_path = os.path.join(self._history_dir(), f"{selected_frame['frame_id']}.txt")
+
         # Create and start worker
         self.worker = DownloadWorker(
             email=email,
@@ -392,6 +407,7 @@ class MainWindow(QMainWindow):
             organize_by_year=self.year_checkbox.isChecked(),
             videos_only=self.videos_only_checkbox.isChecked(),
             save_assets_path=save_assets_path,
+            history_path=history_path,
             parent=self
         )
 
@@ -421,6 +437,13 @@ class MainWindow(QMainWindow):
         self.year_checkbox.setEnabled(enabled)
         self.videos_only_checkbox.setEnabled(enabled)
         self.save_assets_checkbox.setEnabled(enabled)
+        self.history_checkbox.setEnabled(enabled)
+
+    @staticmethod
+    def _history_dir() -> str:
+        """Folder holding one download history file per frame."""
+        app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        return os.path.join(app_data, "history")
 
     def _truncate_filename(self, filename: str, max_length: int = 35) -> str:
         """Truncate filename with ellipsis in the middle if too long."""
